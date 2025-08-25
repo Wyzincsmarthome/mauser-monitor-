@@ -50,32 +50,39 @@ def get_hidden_inputs(soup: BeautifulSoup):
     return data
 
 def login_mauser(session: requests.Session, cfg: dict):
+    """Login heurístico.
+    NOTA: a Mauser pode usar nomes de campos diferentes.
+    Deixamos placeholders e validamos na prática (ajusto depois se necessário)."""
     login_cfg = cfg["login"]
-    # 1) GET login page para obter tokens ocultos (CSRF/form_key)
+
+    # 1) GET login page
     r = session.get(login_cfg["login_page"], headers=HEADERS, timeout=60)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "lxml")
     payload = get_hidden_inputs(soup)
 
-    # 2) preencher user e pass
+    # 2) preencher user e pass (placeholders)
     payload[login_cfg["user_field"]] = MAUSER_USER
     payload[login_cfg["pass_field"]] = MAUSER_PASS
 
-    # 3) POST login
+    # 3) POST login (se a página usar outro endpoint, substituímos depois)
     r2 = session.post(login_cfg["post_url"], data=payload, headers=HEADERS, timeout=60, allow_redirects=True)
     r2.raise_for_status()
 
-    # 4) Verificação simples de login (heurística)
-    # Se continuar a mostrar form de login, assumimos falha
+    # 4) Verificação simples
     check = session.get(login_cfg["login_page"], headers=HEADERS, timeout=60)
-    if "logout" in check.text.lower() or "sair" in check.text.lower() or "minha conta" in check.text.lower():
+    # Se após login já não mostra o formulário, ou aparecer "minha conta" / "logout", assumimos ok
+    if any(s in check.text.lower() for s in ["minha conta", "logout", "sair"]):
         print("[INFO] Login bem-sucedido.")
         return True
-    print("[WARN] Não foi possível confirmar login. Continuando mesmo assim...")
+    print("[WARN] Não foi possível confirmar login (pode continuar visível sem login).")
     return True
 
 def extract_with_selector(soup: BeautifulSoup, selector: str, regex: str | None):
-    el = soup.select_one(selector) if selector else None
+    """Extrai por CSS selector (se existir) e aplica regex opcional."""
+    if not selector:
+        return None
+    el = soup.select_one(selector)
     if not el:
         return None
     text = el.get_text(strip=True)
@@ -85,12 +92,20 @@ def extract_with_selector(soup: BeautifulSoup, selector: str, regex: str | None)
             return m.group(1)
     return text
 
+def extract_from_html(html: str, regex_full_html: str | None):
+    """Fallback: aplica regex diretamente ao HTML completo."""
+    if not regex_full_html:
+        return None
+    m = re.search(regex_full_html, html, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1)
+    return None
+
 def normalize_price(val: str | None):
     if not val:
         return None
-    # trocar vírgula por ponto e remover espaços/símbolos
     v = val.replace("€", "").replace(" ", "").replace("\u00a0", "")
-    v = v.replace(",", ".")
+    v = v.replace(".", "").replace(",", ".")  # 1.234,56 -> 1234.56
     try:
         return round(float(v), 2)
     except:
@@ -100,13 +115,21 @@ def fetch_product(session: requests.Session, pconf: dict):
     url = pconf["url"]
     r = session.get(url, headers=HEADERS, timeout=60)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
+    html = r.text
+    soup = BeautifulSoup(html, "lxml")
 
-    price_cfg = pconf.get("price", {})
-    stock_cfg = pconf.get("stock", {})
+    price_cfg = pconf.get("price", {}) or {}
+    stock_cfg = pconf.get("stock", {}) or {}
 
+    # 1) tentar por selector
     raw_price = extract_with_selector(soup, price_cfg.get("selector"), price_cfg.get("regex"))
     raw_stock = extract_with_selector(soup, stock_cfg.get("selector"), stock_cfg.get("regex"))
+
+    # 2) fallback por regex no HTML completo
+    if not raw_price:
+        raw_price = extract_from_html(html, price_cfg.get("regex_full_html"))
+    if not raw_stock:
+        raw_stock = extract_from_html(html, stock_cfg.get("regex_full_html"))
 
     price = normalize_price(raw_price)
     stock = raw_stock if raw_stock else None
@@ -133,6 +156,8 @@ def diff_values(old: dict | None, new: dict):
 def main():
     # valida env
     if not (MAUSER_USER and MAUSER_PASS):
+        # Nota: por agora algumas páginas mostram preço/stock sem login;
+        # ainda assim, exigimos credenciais para futuro e para páginas restritas.
         raise RuntimeError("Define MAUSER_USERNAME e MAUSER_PASSWORD em Secrets/ENV.")
     cfg = load_config()
     state = load_state()
@@ -156,25 +181,20 @@ def main():
                 changes = diff_values(previous, data)
                 state[pid] = data
                 if changes:
-                    # Mensagem por produto com alterações
                     msg = (f"**[{p.get('name') or 'Produto'}]**\n"
                            f"{data['url']}\n"
                            f"Alterações: " + "; ".join(changes))
                     changes_msgs.append(msg)
-                time.sleep(1.0)  # para não abusar
+                time.sleep(1.0)
             except Exception as e:
                 err = f":x: Erro ao ler {p.get('name') or p.get('url')}: {e}"
                 print(err)
                 changes_msgs.append(err)
 
-        # guardar estado
         save_state(state)
 
-        # notificação agregada
-        if changes_msgs:
-            content = ":bell: **Alterações detetadas (Mauser)**\n\n" + "\n\n".join(changes_msgs)
-        else:
-            content = ":white_check_mark: Sem alterações em preço/stock (Mauser)."
+        content = (":bell: **Alterações detetadas (Mauser)**\n\n" + "\n\n".join(changes_msgs)) if changes_msgs \
+                  else ":white_check_mark: Sem alterações em preço/stock (Mauser)."
         send_discord_message(content)
 
 if __name__ == "__main__":
