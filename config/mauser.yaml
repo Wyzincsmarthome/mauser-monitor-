@@ -1,0 +1,25 @@
+site: "https://www.mauser.pt"
+login:
+  login_page: "https://www.mauser.pt/customer/account/login/"   # página de login (GET)
+  # O script lê todos os <input type="hidden"> automaticamente e inclui no POST
+  post_url: "https://www.mauser.pt/customer/account/loginPost/" # endpoint típico Magento
+  user_field: "login[username]"
+  pass_field: "login[password]"
+
+products:
+  - name: "Produto A"
+    url: "https://www.mauser.pt/produto-exemplo-a.html"
+    price:
+      selector: "span.price"           # CSS selector do preço
+      regex: "([0-9]+[\\.,][0-9]{2})"  # opcional: extrai número (pt-PT)
+    stock:
+      selector: "div.stock span"       # CSS selector do stock/estado
+      regex: null                      # opcional
+  - name: "Produto B"
+    url: "https://www.mauser.pt/produto-exemplo-b.html"
+    price:
+      selector: "span.price"
+      regex: "([0-9]+[\\.,][0-9]{2})"
+    stock:
+      selector: "div.availability span"
+      regex: null
